@@ -16,6 +16,7 @@ trafficgen           benchmark      /bench-trafficgen                           
 cyclictest           benchmark      /bench-cyclictest                               main
 hwlatdetect          benchmark      /bench-hwlatdetect                              main
 tracer               benchmark      /bench-tracer                                   main
+flexran              benchmark      /bench-flexran                                  main
 sysstat              tool           /tool-sysstat                                   master
 procstat             tool           /tool-procstat                                  master
 ftrace               tool           /tool-ftrace                                    master
