@@ -24,6 +24,7 @@ if [ -z "${LOG_DB}" -o ! -e "${LOG_DB}" -a "$CRUCIBLE_USE_LOGGER" == "1" ]; then
     exit 2
 fi
 
+
 . /etc/sysconfig/crucible
 . $CRUCIBLE_HOME/bin/base
 
@@ -46,10 +47,8 @@ container_rs_args+=("-e RS_REG_AUTH=$CRUCIBLE_CLIENT_SERVER_AUTH")
 container_rs_args+=("-e RS_EMAIL=$CRUCIBLE_EMAIL")
 container_rs_args+=("-e RS_NAME=\"$CRUCIBLE_NAME\"")
 
-container_rs_run_args=()
-container_rs_run_args+=("--mount=type=bind,source=/var/lib/containers,destination=/var/lib/containers")
-
 function start_httpd() {
+    debug
     httpd_cmd="/usr/sbin/httpd -DFOREGROUND"
     echo -n "Checking for httpd"
     RET_VAL=0
@@ -84,7 +83,8 @@ function start_redis() {
 }
 
 function start_es() {
-    local es_available count status_check RET_VAL es_timeout pod_name
+    debug
+    local es_available count status_check RET_VAL es_timeout
     local es_start_cmd es_status_cmd
     es_start_cmd="${CRUCIBLE_HOME}/config/start-es.sh $var_crucible/es"
     es_status_cmd="curl --silent --show-error --stderr - -X GET localhost:9200/_cat/indices"
@@ -106,8 +106,7 @@ function start_es() {
         es_timeout=60
         echo "Waiting for elasticsearch to be available (${es_timeout} seconds maximum)..."
         while [ ${es_available} != 1 -a ${count} -lt ${es_timeout} ]; do
-            pod_name=crucible-es-status-check-$(uuidgen)
-            status_check=$($podman_run --name ${pod_name} "${container_common_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $es_status_cmd)
+            status_check=$($podman_run --name crucible-es-status-check "${container_common_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $es_status_cmd)
             if echo "${status_check}" | grep -q "Connection refused"; then
                 sleep 1
             else
@@ -117,15 +116,17 @@ function start_es() {
             (( count += 1 ))
         done
         if [ ${es_available} -eq 0 ]; then
+            echo -n "Elasticsearch failed"
             exit_error "elasticsearch failed to launch properly"
         fi
     fi
 }
 
 function init_es() {
+    debug
     RET_VAL=0
     es_init_cmd="${CRUCIBLE_HOME}/config/init-es.sh ${CRUCIBLE_HOME}/subprojects/core/CommonDataModel/templates"
-    $podman_run --name crucible-init-es-$(uuidgen) "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $es_init_cmd
+    $podman_run "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $es_init_cmd
     RET_VAL=$?
     if [ $RET_VAL -gt 0 ]; then
         exit_error "Could not init elasticseach"
@@ -133,6 +134,7 @@ function init_es() {
 }
 
 function post_process_run() {
+    debug
     local RUN_DIR=${1}
     shift
 
@@ -146,8 +148,8 @@ function post_process_run() {
     start_httpd
     start_es
 
-    $podman_run --name crucible-rickshaw-pp-bench-$(uuidgen) "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $rs_pp_b_cmd && \
-        $podman_run --name crucible-rickshaw-pp-tools-$(uuidgen) "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $rs_pp_t_cmd && \
+    $podman_run "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $rs_pp_b_cmd && \
+        $podman_run "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $rs_pp_t_cmd && \
         echo "Benchmark result is in ${RUN_DIR}" && \
         init_es
 
@@ -164,17 +166,17 @@ function post_process_run() {
     fi
 
     if [ -f $run_json ]; then
-        $podman_run --name crucible-rickshaw-index-$(uuidgen) "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $rs_index_cmd
+        $podman_run "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $rs_index_cmd
         RET_VAL=$?
         if [ $RET_VAL -eq 0 ]; then
             echo "Benchmark result now in elastic, localhost:9200"
-            this_id=`$podman_run --name crucible-extract-run-id-$(uuidgen) "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE /bin/bash -c "${result_dumper} ${run_json} | jq -r '. \"run-id\"'"`
+            this_id=`$podman_run "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE ${result_dumper} ${run_json} | jq -r '. "run-id"'`
             if [ ! -z "$this_id" ]; then
                 cdm_query_cmd="${CRUCIBLE_HOME}/subprojects/core/CommonDataModel/queries/cdmq/get-result-summary.sh"
                 cdm_query_cmd+=" --run=$this_id"
                 echo "Generating benchmark summary report"
                 sleep 5 # ES may take 5 seconds to have data ready (from a setting which can vastly improve index operations)
-                $podman_run --name crucible-get-result-$(uuidgen) "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $cdm_query_cmd | tee "${RUN_DIR}/run/result-summary.txt"
+                $podman_run "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $cdm_query_cmd | tee "${RUN_DIR}/run/result-summary.txt"
                 RET_VAL=$?
                 if [ $RET_VAL -eq 0 ]; then
                     echo
@@ -194,6 +196,7 @@ function post_process_run() {
     fi
 }
 
+debug
 if [ "${1}" == "log" ]; then
     shift
     crucible_log ${1} ${LOG_DB}
@@ -233,25 +236,25 @@ elif [ "${1}" == "get" ]; then
         start_httpd
         start_es
         get_result_cmd="${CRUCIBLE_HOME}/subprojects/core/CommonDataModel/queries/cdmq/get-result-summary.sh"
-        $podman_run --name crucible-get-result-$(uuidgen) "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $get_result_cmd "$@"
+        $podman_run --name crucible-get-result "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $get_result_cmd "$@"
     elif [ "${1}" == "metric" ]; then
         shift
         start_redis
         start_httpd
         start_es
         get_metric_cmd="${CRUCIBLE_HOME}/subprojects/core/CommonDataModel/queries/cdmq/get-metric-data.sh"
-        $podman_run --name crucible-get-metric-$(uuidgen) "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $get_metric_cmd "$@"
+        $podman_run --name crucible-get-metric "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $get_metric_cmd "$@"
     fi
 elif [ "${1}" == "rm" ]; then
     shift
     start_es
     rm_result_cmd="${CRUCIBLE_HOME}/subprojects/core/CommonDataModel/queries/cdmq/delete-run.sh"
-    $podman_run --name crucible-rm-result-$(uuidgen) "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $rm_result_cmd "$@"
+    $podman_run --name crucible-rm-result "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $rm_result_cmd "$@"
 elif [ "${1}" == "index" ]; then
     shift
     start_es
     index_result_cmd="${CRUCIBLE_HOME}/subprojects/core/rickshaw/rickshaw-index"
-    $podman_run --name crucible-rickshaw-index-$(uuidgen) "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $index_result_cmd "$@"
+    $podman_run --name crucible-index "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $index_result_cmd "$@"
 elif [ "${1}" == "es" ]; then
     shift
     start_es
@@ -280,6 +283,7 @@ elif [ "${1}" == "run" ]; then
     benchmark=${1}
     shift
     base_run_dir=""
+    debug
     bench_params="bench-params.json"
     tool_params="tool-params.json"
     use_mv_params=0
@@ -322,6 +326,9 @@ elif [ "${1}" == "run" ]; then
     if [ -z "$CRUCIBLE_CLIENT_SERVER_REPO" ]; then
         exit_error "CRUCIBLE_CLIENT_SERVER_REPO is not defined"
     fi
+    if [ -z "$CRUCIBLE_CLIENT_SERVER_AUTH" ]; then
+        exit_error "CRUCIBLE_CLIENT_SERVER_AUTH is not defined"
+    fi
     if [ -z "$CRUCIBLE_CONTAINER_IMAGE" ]; then
         echo "Exiting because CRUCIBLE_CONTAINER_IMAGE is not defined"
         exit 1
@@ -334,55 +341,37 @@ elif [ "${1}" == "run" ]; then
     benchmark_subproj_dir="${CRUCIBLE_HOME}"/subprojects/benchmarks/$benchmark
     rs_dir="${CRUCIBLE_HOME}"/subprojects/core/rickshaw
 
-    if [ ! -e "$benchmark_subproj_dir" ]; then
-        echo "Running benchmark $benchmark requires that subproject"
-        echo "located in "${CRUCIBLE_HOME}"/subprojects/bench/$benchmark"
-        echo "This directory could not be found.  Here are the benchmark"
-        echo "subproject directories:"
-        /bin/ls "${CRUCIBLE_HOME}"/subprojects/bench/$benchmark
-        exit 1
-    fi
-
     if [ "${use_mv_params}" == "1" ]; then
         if [ ! -e "${mv_params}" ]; then
             echo "The multi-value params file you specified with --mv-params (${mv_params}) does not exist!"
             exit 1
         else
-            echo "Generating --bench-params from --mv-params..."
-
             mv_params_run_dir=${base_run_dir}/config/mv-params.json
             cp ${mv_params} ${mv_params_run_dir}
-            bench_params_run_file=${base_run_dir}/config/bench-params.json
-            bench_params_run_output=${base_run_dir}/config/bench-params.txt
+            bench_params_run_dir=${base_run_dir}/config/bench-params.json
 
-            multiplex_cmd="${CRUCIBLE_HOME}/subprojects/core/multiplex/multiplex.py --input ${mv_params_run_dir} --output ${bench_params_run_file}"
-            if [ -e ${benchmark_subproj_dir}/multiplex.json ]; then
-                multiplex_cmd+=" --requirements ${benchmark_subproj_dir}/multiplex.json"
-            else
-                echo "Skipping benchmark requirements validation because there is no ${benchmark_subproj_dir}/multiplex.json"
-            fi
-
-            multiplex_cmd="$podman_run -i --name crucible-multiplex-$(uuidgen) "${container_common_args[@]}" $CRUCIBLE_CONTAINER_IMAGE ${multiplex_cmd}"
-            echo "${multiplex_cmd} > ${bench_params_run_output} 2>&1"
-            ${multiplex_cmd} > ${bench_params_run_output} 2>&1
+            echo "Generating --bench-params from --mv-params..."
+            debug
+            echo "$podman_run -i --name crucible-multiplex "${container_common_args[@]}" $CRUCIBLE_CONTAINER_IMAGE ${CRUCIBLE_HOME}/subprojects/core/multiplex/multiplex.py --input ${mv_params_run_dir} > ${bench_params_run_dir}"
+            $podman_run -i --name crucible-multiplex "${container_common_args[@]}" $CRUCIBLE_CONTAINER_IMAGE ${CRUCIBLE_HOME}/subprojects/core/multiplex/multiplex.py --input ${mv_params_run_dir} > ${bench_params_run_dir}
             rc=$?
             if [ "$rc" != "0" ]; then
                 echo "multiplex failed with an error and returned rc=$rc"
                 echo "multiplex output is:"
-                cat ${bench_params_run_output}
+                cat ${bench_params_run_dir}
                 exit 1
             fi
 
-            bench_params=${bench_params_run_file}
+            bench_params=${bench_params_run_dir}
         fi
     elif [ ! -e ${bench_params} ]; then
         echo "Make sure you have defined the benchmark parameters and put them in a file \"./bench-params.json\""
         echo "or that you explicitly specify the benchmark parameters file with \"--bench-params=<file>\"."
         exit 1
     else
-        bench_params_run_file=${base_run_dir}/config/bench-params.json
-        cp ${bench_params} ${bench_params_run_file}
-        bench_params=${bench_params_run_file}
+        bench_params_run_dir=${base_run_dir}/config/bench-params.json
+        cp ${bench_params} ${bench_params_run_dir}
+        bench_params=${bench_params_run_dir}
     fi
 
     tool_params_file=${base_run_dir}/config/tool-params.json
@@ -405,11 +394,22 @@ elif [ "${1}" == "run" ]; then
     params_args+=" --bench-params ${bench_params}"
     params_args+=" --tool-params ${tool_params_file}"
 
+    debug
+    if [ ! -e "$benchmark_subproj_dir" ]; then
+        echo "Running benchmark $benchmark requires that subproject"
+        echo "located in "${CRUCIBLE_HOME}"/subprojects/bench/$benchmark"
+        echo "This directory could not be found.  Here are the benchmark"
+        echo "subproject directories:"
+        /bin/ls "${CRUCIBLE_HOME}"/subprojects/bench/$benchmark
+        exit 1
+    fi
+
     start_redis
 
     ${CRUCIBLE_HOME}/bin/repo info > ${base_run_dir}/config/crucible.repo.info
     ${CRUCIBLE_HOME}/bin/repo details > ${base_run_dir}/config/crucible.repo.details
 
+    debug
     rs_run_cmd="${CRUCIBLE_HOME}/subprojects/core/rickshaw/rickshaw-run\
       ${params_args}\
       --bench-dir $benchmark_subproj_dir\
@@ -419,15 +419,13 @@ elif [ "${1}" == "run" ]; then
       --tools-dir=${CRUCIBLE_HOME}/subprojects/tools\
       --base-run-dir=$base_run_dir\
       ${passthru_args[@]}"
-    $podman_run --name crucible-rickshaw-run-$(uuidgen) "${container_common_args[@]}" "${container_rs_args[@]}" "${container_rs_run_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $rs_run_cmd
-    RET_VAL=$?
+    debug
+    $podman_run --name crucible-run "${container_common_args[@]}" "${container_rs_args[@]}" $CRUCIBLE_CONTAINER_IMAGE $rs_run_cmd
 
-    if [ ${RET_VAL} == 0 ]; then
-        post_process_run ${base_run_dir}
-    fi
+    debug
+    post_process_run ${base_run_dir}
 
     if [ "$CRUCIBLE_USE_LOGGER" == "1" ]; then
-        sleep 1
         echo "Archiving crucible log to ${base_run_dir}"
         crucible_log view ${LOG_DB} sessionid ${LOGGER_SESSION_ID} | xz -9 -T0 > ${base_run_dir}/crucible.log.xz
     fi
