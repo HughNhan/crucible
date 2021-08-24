@@ -34,7 +34,6 @@ if [ -z "$CRUCIBLE_CONTAINER_IMAGE" ]; then
     exit 1
 fi
 
-debug
 podman --version >/dev/null
 if [ $? -gt 0 ]; then
     echo "You must have podman to use the crucible controller with containers.  Please install and run again"
@@ -138,7 +137,6 @@ if [ "$CRUCIBLE_USE_LOGGER" == "1" ]; then
     exec > ${STDOUT_PIPE} 2> ${STDERR_PIPE}
 fi
 
-debug
 # invoke the main command handler
 ${CRUCIBLE_HOME}/bin/_main "${LOGGER_SESSION_ID}" "${LOG_DB}" "$@"
 RET_VAL=${?}
